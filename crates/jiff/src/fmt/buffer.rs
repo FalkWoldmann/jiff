@@ -51,20 +51,6 @@ impl<const N: usize> ArrayBuffer<N> {
     pub(crate) fn as_borrowed<'data>(&mut self) -> BorrowedBuffer<'_> {
         BorrowedBuffer::from(&mut self.data)
     }
-
-    /// Assume this entire buffer is initialized and return it as an array.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure the entire buffer is initialized.
-    unsafe fn assume_init(self) -> [u8; N] {
-        // SAFETY: Callers are responsible for ensuring that `self.data`
-        // is initialized. Otherwise, `MaybeUninit<u8>` and `u8` have the
-        // same representation.
-        unsafe {
-            *(&self.data as *const [MaybeUninit<u8>; N] as *const [u8; N])
-        }
-    }
 }
 
 /// Construct an uninitialized buffer of data of size `N`.
@@ -253,20 +239,12 @@ impl<'data> BorrowedBuffer<'data> {
     pub(crate) fn write_int(&mut self, n: impl Into<u64>) {
         let mut n = n.into();
         let digits = digits(n);
-        let mut remaining_digits = usize::from(digits);
         let available = self
             .available()
-            .get_mut(..remaining_digits)
+            .get_mut(..usize::from(digits))
             .expect("u8 integer digits exceeds available buffer space");
-        while remaining_digits > 0 {
-            remaining_digits -= 1;
-            // SAFETY: The assert above guarantees that `remaining_digits` is
-            // always in bounds.
-            unsafe {
-                available
-                    .get_unchecked_mut(remaining_digits)
-                    .write(b'0' + ((n % 10) as u8));
-            }
+        for dst in available.iter_mut().rev() {
+            dst.write(b'0' + ((n % 10) as u8));
             n /= 10;
         }
         self.filled += u16::from(digits);
@@ -290,20 +268,12 @@ impl<'data> BorrowedBuffer<'data> {
         let mut n = n.into();
         let pad_len = pad_len.min(MAX_INTEGER_LEN);
         let digits = pad_len.max(digits(n));
-        let mut remaining_digits = usize::from(digits);
         let available = self
             .available()
-            .get_mut(..remaining_digits)
+            .get_mut(..usize::from(digits))
             .expect("u8 integer digits exceeds available buffer space");
-        while remaining_digits > 0 {
-            remaining_digits -= 1;
-            // SAFETY: The assert above guarantees that `remaining_digits` is
-            // always in bounds.
-            unsafe {
-                available
-                    .get_unchecked_mut(remaining_digits)
-                    .write(b'0' + ((n % 10) as u8));
-            }
+        for dst in available.iter_mut().rev() {
+            dst.write(b'0' + ((n % 10) as u8));
             n /= 10;
         }
         self.filled += u16::from(digits);
@@ -332,32 +302,20 @@ impl<'data> BorrowedBuffer<'data> {
         let mut n = n.into();
         let pad_len = pad_len.min(MAX_INTEGER_LEN);
         let digits = pad_len.max(digits(n));
-        let mut remaining_digits = usize::from(digits);
         let available = self
             .available()
-            .get_mut(..remaining_digits)
+            .get_mut(..usize::from(digits))
             .expect("u8 integer digits exceeds available buffer space");
-        while remaining_digits > 0 {
-            remaining_digits -= 1;
-            // SAFETY: The assert above guarantees that `remaining_digits` is
-            // always in bounds.
-            unsafe {
-                available
-                    .get_unchecked_mut(remaining_digits)
-                    .write(b'0' + ((n % 10) as u8));
-            }
+        let mut remaining = available.iter_mut().rev();
+        for dst in &mut remaining {
+            dst.write(b'0' + ((n % 10) as u8));
             n /= 10;
             if n == 0 {
                 break;
             }
         }
-        while remaining_digits > 0 {
-            remaining_digits -= 1;
-            // SAFETY: The assert above guarantees that `remaining_digits` is
-            // always in bounds.
-            unsafe {
-                available.get_unchecked_mut(remaining_digits).write(pad_byte);
-            }
+        for dst in remaining {
+            dst.write(pad_byte);
         }
         self.filled += u16::from(digits);
     }
@@ -403,16 +361,8 @@ impl<'data> BorrowedBuffer<'data> {
             .get_mut(..2)
             .expect("padded 2 digit integer exceeds available buffer space");
         let radix_offset = ((n % 100) * 2) as usize;
-        // SAFETY: Valid because of the assertion above. And also,
-        // `RADIX_100_ZERO` always has exactly 200 elements and
-        // `radix_offset` is never greater than 198. (In that case,
-        // we do access element at index 199 below as well.)
-        unsafe {
-            dst.get_unchecked_mut(0)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset));
-            dst.get_unchecked_mut(1)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset + 1));
-        }
+        dst[0].write(RADIX_100_ZERO[radix_offset]);
+        dst[1].write(RADIX_100_ZERO[radix_offset + 1]);
         self.filled += 2;
     }
 
@@ -440,16 +390,8 @@ impl<'data> BorrowedBuffer<'data> {
             .get_mut(..2)
             .expect("padded 2 digit integer exceeds available buffer space");
         let radix_offset = ((n % 100) * 2) as usize;
-        // SAFETY: Valid because of the assertion above. And also,
-        // `RADIX_100_ZERO` always has exactly 200 elements and
-        // `radix_offset` is never greater than 198. (In that case,
-        // we do access element at index 199 below as well.)
-        unsafe {
-            dst.get_unchecked_mut(0)
-                .write(*RADIX_100_SPACE.get_unchecked(radix_offset));
-            dst.get_unchecked_mut(1)
-                .write(*RADIX_100_SPACE.get_unchecked(radix_offset + 1));
-        }
+        dst[0].write(RADIX_100_SPACE[radix_offset]);
+        dst[1].write(RADIX_100_SPACE[radix_offset + 1]);
         self.filled += 2;
     }
 
@@ -478,29 +420,13 @@ impl<'data> BorrowedBuffer<'data> {
             .expect("padded 4 digit integer exceeds available buffer space");
 
         let radix_offset = ((n % 100) * 2) as usize;
-        // SAFETY: Valid because of the assertion above. And also,
-        // `RADIX_100_ZERO` always has exactly 200 elements and
-        // `radix_offset` is never greater than 198. (In that case,
-        // we do access element at index 199 below as well.)
-        unsafe {
-            dst.get_unchecked_mut(2)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset));
-            dst.get_unchecked_mut(3)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset + 1));
-        }
+        dst[2].write(RADIX_100_ZERO[radix_offset]);
+        dst[3].write(RADIX_100_ZERO[radix_offset + 1]);
 
         n /= 100;
         let radix_offset = ((n % 100) * 2) as usize;
-        // SAFETY: Valid because of the assertion above. And also,
-        // `RADIX_100_ZERO` always has exactly 200 elements and
-        // `radix_offset` is never greater than 198. (In that case,
-        // we do access element at index 199 below as well.)
-        unsafe {
-            dst.get_unchecked_mut(0)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset));
-            dst.get_unchecked_mut(1)
-                .write(*RADIX_100_ZERO.get_unchecked(radix_offset + 1));
-        }
+        dst[0].write(RADIX_100_ZERO[radix_offset]);
+        dst[1].write(RADIX_100_ZERO[radix_offset + 1]);
 
         self.filled += 4;
     }
@@ -523,23 +449,15 @@ impl<'data> BorrowedBuffer<'data> {
         mut n: u32,
     ) {
         assert!(n <= 999_999_999);
-        let mut buf = ArrayBuffer::<MAX_PRECISION>::default();
-        for i in (0..MAX_PRECISION).rev() {
-            // SAFETY: Okay since `i` is guaranteed to be a valid index in
-            // `buf`. Namely, `buf` is created with `MAX_PRECISION` slots and
-            // `MAX_PRECISION - 1` is the largest value of `i` possible here.
-            unsafe {
-                buf.data.get_unchecked_mut(i).write(b'0' + ((n % 10) as u8));
-            }
+        let mut buf = [0; MAX_PRECISION];
+        for digit in buf.iter_mut().rev() {
+            *digit = b'0' + ((n % 10) as u8);
             n /= 10;
         }
 
         let end = precision
             .map(|p| p.min(MAX_PRECISION as u8))
             .unwrap_or_else(|| {
-                // SAFETY: The loop above is guaranteed to initialize `buf` in
-                // its entirety.
-                let buf = unsafe { buf.assume_init() };
                 let mut end = MAX_PRECISION as u8;
                 while end > 0 && buf[usize::from(end) - 1] == b'0' {
                     end -= 1;
@@ -547,11 +465,14 @@ impl<'data> BorrowedBuffer<'data> {
                 end
             });
 
-        let buf = &buf.data[..usize::from(end)];
-        self.available()
+        let buf = &buf[..usize::from(end)];
+        let available = self
+            .available()
             .get_mut(..buf.len())
-            .expect("fraction exceeds available buffer space")
-            .copy_from_slice(buf);
+            .expect("fraction exceeds available buffer space");
+        for (dst, &byte) in available.iter_mut().zip(buf) {
+            dst.write(byte);
+        }
         self.filled += u16::from(end);
     }
 
